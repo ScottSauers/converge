@@ -2,26 +2,25 @@ use image::{GenericImageView, Rgba, RgbaImage};
 use rand::Rng;
 use std::fs;
 use std::thread;
-use std::time::{Duration, Instant};
 use svg::Document;
-use svg::node::element::path::Data;
-use svg::node::element::Path;
 use resvg::usvg::{Tree, Options};
 use resvg::tiny_skia::{Pixmap, Transform};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use svg::node::element::{Definitions, Filter, Stop, LinearGradient};
+use svg::node::element::path::Data;
+use svg::node::element::Path;
 
 mod ui;
 use ui::run_ui_main_thread;
 
 
 const POPULATION_SIZE: usize = 50;
-const GENERATIONS: usize = 1000;
-const MUTATION_RATE: f32 = 0.1;
-const MAX_PATHS: usize = 100;
-const MAX_COMMANDS: usize = 20;
+const GENERATIONS: usize = 10000;
+const MAX_PATHS: usize = 40;
+const ELITISM_COUNT: usize = 5;
 
 #[derive(Clone, Debug)]
 enum Command {
@@ -35,15 +34,41 @@ enum Command {
     T(f32, f32),
     A(f32, f32, f32, bool, bool, f32, f32),
     Z,
+    LinearGradient(CustomLinearGradient),
 }
 
 #[derive(Clone, Debug)]
 struct Individual {
-    paths: Vec<(Vec<Command>, Rgba<u8>)>,
+    paths: Vec<(Vec<Command>, PathStyle)>,
     fitness: f32,
 }
 
-fn random_command(rng: &mut rand::rngs::ThreadRng, width: u32, height: u32) -> Command {
+
+
+
+#[derive(Clone, Debug)]
+struct CustomLinearGradient {
+    start: (f32, f32),
+    end: (f32, f32),
+    colors: Vec<Rgba<u8>>,
+}
+
+#[derive(Clone, Debug)]
+struct PathStyle {
+    fill: Rgba<u8>,
+    gradient: Option<CustomLinearGradient>,
+}
+
+
+
+fn adaptive_mutation_rate(generation: usize, max_generations: usize) -> f32 {
+    let min_rate = 0.01;
+    let max_rate = 0.2;
+    let progress = generation as f32 / max_generations as f32;
+    max_rate - (max_rate - min_rate) * progress
+}
+
+fn random_command(rng: &mut impl Rng, width: u32, height: u32) -> Command {
     match rng.gen_range(0..10) {
         0 => Command::M(rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
         1 => Command::L(rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
@@ -72,49 +97,41 @@ fn random_command(rng: &mut rand::rngs::ThreadRng, width: u32, height: u32) -> C
     }
 }
 
-fn random_color(rng: &mut rand::rngs::ThreadRng) -> Rgba<u8> {
+fn random_color(rng: &mut impl Rng) -> Rgba<u8> {
     Rgba([rng.gen(), rng.gen(), rng.gen(), rng.gen_range(50..=200)])
 }
 
-fn create_random_individual(rng: &mut rand::rngs::ThreadRng, width: u32, height: u32) -> Individual {
-    let num_paths = rng.gen_range(1..=MAX_PATHS);
-    let paths: Vec<(Vec<Command>, Rgba<u8>)> = (0..num_paths)
+fn create_random_individual(rng: &mut impl Rng, width: u32, height: u32) -> Individual {
+    let num_paths = rng.gen_range(1..=100);
+    let paths: Vec<(Vec<Command>, PathStyle)> = (0..num_paths)
         .map(|_| {
-            let num_commands = rng.gen_range(1..=MAX_COMMANDS);
+            let num_commands = rng.gen_range(1..=50);
             let commands: Vec<Command> = (0..num_commands)
                 .map(|_| random_command(rng, width, height))
                 .collect();
-            (commands, random_color(rng))
+            (commands, random_path_style(rng, width, height))
         })
         .collect();
 
     Individual { paths, fitness: 0.0 }
 }
 
-fn mutate(individual: &mut Individual, rng: &mut rand::rngs::ThreadRng, width: u32, height: u32) {
-    for (commands, color) in &mut individual.paths {
-        if rng.gen::<f32>() < MUTATION_RATE {
-            let index = rng.gen_range(0..commands.len());
-            commands[index] = random_command(rng, width, height);
-        }
-        if rng.gen::<f32>() < MUTATION_RATE {
-            *color = random_color(rng);
-        }
-    }
-    if rng.gen::<f32>() < MUTATION_RATE {
-        if individual.paths.len() < MAX_PATHS {
-            individual.paths.push((
-                vec![random_command(rng, width, height)],
-                random_color(rng),
-            ));
-        } else if !individual.paths.is_empty() {
-            let index = rng.gen_range(0..individual.paths.len());
-            individual.paths.remove(index);
-        }
+fn random_path_style(rng: &mut impl Rng, width: u32, height: u32) -> PathStyle {
+    PathStyle {
+        fill: random_color(rng),
+        gradient: if rng.gen_bool(0.5) {
+            Some(CustomLinearGradient {
+                start: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
+                end: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
+                colors: (0..5).map(|_| random_color(rng)).collect(), //  5 colors
+            })
+        } else { 
+            None 
+        },
     }
 }
 
-fn crossover(parent1: &Individual, parent2: &Individual, rng: &mut rand::rngs::ThreadRng) -> Individual {
+fn crossover(parent1: &Individual, parent2: &Individual, rng: &mut impl Rng) -> Individual {
     let mut child_paths = Vec::new();
     let max_len = parent1.paths.len().max(parent2.paths.len());
     
@@ -220,9 +237,6 @@ fn calculate_fitness(img: &image::DynamicImage, individual: &Individual) -> f32 
 
 
 
-
-
-
 fn optimize_image(
     img: &image::DynamicImage,
     best_individual: &Arc<Mutex<Individual>>,
@@ -262,27 +276,80 @@ fn optimize_image(
         // Send the updated image to the UI thread
         update_sender.send(evolved_image).unwrap();
 
+        let elites: Vec<Individual> = population.iter().take(ELITISM_COUNT).cloned().collect();
         let mut new_population = Vec::new();
 
-        while new_population.len() < POPULATION_SIZE {
-            let parent1 = &population[rng.gen_range(0..POPULATION_SIZE / 2)];
-            let parent2 = &population[rng.gen_range(0..POPULATION_SIZE / 2)];
+        while new_population.len() < POPULATION_SIZE - ELITISM_COUNT {
+            let parent1 = tournament_selection(&population, 5, &mut rng);
+            let parent2 = tournament_selection(&population, 5, &mut rng);
             let mut child = crossover(parent1, parent2, &mut rng);
-            mutate(&mut child, &mut rng, width, height);
+            let mutation_rate = adaptive_mutation_rate(gen, GENERATIONS);
+            mutate(&mut child, &mut rng, width, height, mutation_rate);
             child.fitness = calculate_fitness(img, &child);
             new_population.push(child);
         }
 
+        new_population.extend(elites);
         population = new_population;
+
+        // Periodic population refresh
+        if gen % 50 == 0 && gen > 0 {
+            let num_refresh = POPULATION_SIZE / 10;
+            for _ in 0..num_refresh {
+                let mut new_individual = create_random_individual(&mut rng, width, height);
+                new_individual.fitness = calculate_fitness(img, &new_individual);
+                population.push(new_individual);
+            }
+            population.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+            population.truncate(POPULATION_SIZE);
+        }
     }
 
     population.into_iter().max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap()).unwrap()
 }
 
 
+fn tournament_selection<'a>(population: &'a [Individual], tournament_size: usize, rng: &mut impl Rng) -> &'a Individual {
+    population
+        .choose_multiple(rng, tournament_size)
+        .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
+        .unwrap()
+}
 
 
-
+fn mutate(individual: &mut Individual, rng: &mut impl Rng, width: u32, height: u32, mutation_rate: f32) {
+    for (commands, style) in &mut individual.paths {
+        if rng.gen::<f32>() < mutation_rate {
+            let index = rng.gen_range(0..commands.len());
+            commands[index] = random_command(rng, width, height);
+        }
+        if rng.gen::<f32>() < mutation_rate {
+            style.fill = random_color(rng);
+        }
+        if rng.gen::<f32>() < mutation_rate {
+            style.gradient = if rng.gen_bool(0.5) {
+                Some(CustomLinearGradient {
+                    start: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
+                    end: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
+                    colors: (0..5).map(|_| random_color(rng)).collect(), // 5 colors
+                })
+            } else {
+                None
+            };
+        }
+    }
+    if rng.gen::<f32>() < mutation_rate {
+        if individual.paths.len() < MAX_PATHS {
+            individual.paths.push((
+                vec![random_command(rng, width, height)],
+                random_path_style(rng, width, height),
+            ));
+        } else if !individual.paths.is_empty() {
+            let index = rng.gen_range(0..individual.paths.len());
+            individual.paths.remove(index);
+        }
+    }
+}
 
 
 
@@ -293,7 +360,9 @@ fn individual_to_svg(individual: &Individual, width: u32, height: u32) -> Docume
         .set("width", width)
         .set("height", height);
 
-    for (commands, color) in &individual.paths {
+    let mut defs = Definitions::new();
+
+    for (i, (commands, style)) in individual.paths.iter().enumerate() {
         let mut data = Data::new();
         for command in commands {
             match command {
@@ -311,23 +380,42 @@ fn individual_to_svg(individual: &Individual, width: u32, height: u32) -> Docume
                         if *large_arc { 1 } else { 0 }, 
                         if *sweep { 1 } else { 0 }, 
                         *x, *y
-                    )), 
+                    )),
                 Command::Z => data = data.close(),
+                _ => {} // Ignore LinearGradient here as it's handled separately
             }
         }
-        let path = Path::new()
-            .set("fill", format!("rgba({},{},{},{})", color[0], color[1], color[2], color[3]))
-            .set("stroke", "none")
-            .set("d", data);
+
+        let mut path = Path::new().set("d", data);
+
+        if let Some(ref gradient) = style.gradient {
+            let gradient_id = format!("gradient-{}", i);
+            let mut linear_gradient = svg::node::element::LinearGradient::new()
+                .set("id", gradient_id.clone())
+                .set("x1", format!("{}%", gradient.start.0 / width as f32 * 100.0))
+                .set("y1", format!("{}%", gradient.start.1 / height as f32 * 100.0))
+                .set("x2", format!("{}%", gradient.end.0 / width as f32 * 100.0))
+                .set("y2", format!("{}%", gradient.end.1 / height as f32 * 100.0));
+
+            for (j, color) in gradient.colors.iter().enumerate() {
+                let stop = Stop::new()
+                    .set("offset", format!("{}%", j * 100 / (gradient.colors.len() - 1)))
+                    .set("stop-color", format!("rgb({},{},{})", color[0], color[1], color[2]))
+                    .set("stop-opacity", format!("{}", color[3] as f32 / 255.0));
+                linear_gradient = linear_gradient.add(stop);
+            }
+
+            defs = defs.add(linear_gradient);
+            path = path.set("fill", format!("url(#{})", gradient_id));
+        } else {
+            path = path.set("fill", format!("rgba({},{},{},{})", style.fill[0], style.fill[1], style.fill[2], style.fill[3]));
+        }
+
         document = document.add(path);
     }
 
-    document
+    document.add(defs)
 }
-
-
-
-
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
