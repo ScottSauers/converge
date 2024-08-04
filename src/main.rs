@@ -10,7 +10,8 @@ use resvg::usvg::{Tree, Options};
 use resvg::tiny_skia::{Pixmap, Transform};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
-
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 
 mod ui;
 use ui::run_ui_main_thread;
@@ -334,7 +335,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_dir = "/Users/scott/Downloads/converge/output";
     fs::create_dir_all(output_dir)?;
 
-    let image_paths: Vec<_> = fs::read_dir(images_dir)?
+    let mut image_paths: Vec<_> = fs::read_dir(images_dir)?
         .filter_map(|entry| {
             let path = entry.ok()?.path();
             if path.extension()?.to_str()? == "png" {
@@ -344,6 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .collect();
+    image_paths.shuffle(&mut thread_rng());
 
     for path in image_paths {
         let img = image::open(&path).expect("Failed to open image");
