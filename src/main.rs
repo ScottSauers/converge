@@ -1,4 +1,4 @@
-use image::{GenericImageView, Rgba, RgbaImage};
+use image::{GenericImageView, Rgba};
 use rand::Rng;
 use std::fs;
 use std::thread;
@@ -13,6 +13,7 @@ use svg::node::element::{Definitions, Stop};
 use svg::node::element::path::Data;
 use svg::node::element::Path;
 use rand_distr::{Geometric, Distribution};
+use image::RgbaImage;
 
 
 mod ui;
@@ -46,6 +47,17 @@ struct Individual {
     paths: Vec<(Vec<Command>, PathStyle)>,
     fitness: f32,
 }
+
+#[derive(Clone)]
+struct IndividualInfo {
+    individual: Individual,
+    parent_ids: Option<(usize, usize)>,
+    is_elite: bool,
+    is_new: bool,
+    survived: bool,
+    crossover: bool,
+}
+
 
 
 #[derive(Clone, Debug)]
@@ -254,7 +266,7 @@ fn optimize_image(
     fitness_history: &Arc<Mutex<Vec<f32>>>,
     generation: &Arc<Mutex<usize>>,
     running: &Arc<Mutex<bool>>,
-    update_sender: mpsc::Sender<RgbaImage>,
+    update_sender: mpsc::Sender<Vec<IndividualInfo>>,
 ) -> Individual {
     let mut rng = rand::thread_rng();
     let (width, height) = img.dimensions();
@@ -286,8 +298,20 @@ fn optimize_image(
         fitness_history.lock().unwrap().push(best.fitness);
         *generation.lock().unwrap() = gen;
 
-        // Send the updated image to the UI thread
-        update_sender.send(evolved_image).unwrap();
+        // Create IndividualInfo for each member of the population
+        let population_info: Vec<IndividualInfo> = population.iter().enumerate()
+            .map(|(i, ind)| IndividualInfo {
+                individual: ind.clone(),
+                parent_ids: None, // track this during crossover
+                is_elite: i < ELITISM_COUNT,
+                is_new: false, // set this to true for new individuals
+                survived: true, // All individuals in the current population have survived
+                crossover: false, // Set this during the crossover process
+            })
+            .collect();
+
+        // Send the entire population info to the UI thread
+        update_sender.send(population_info).unwrap();
 
         let elites: Vec<Individual> = population.iter().take(ELITISM_COUNT).cloned().collect();
         let mut new_population = Vec::new();
@@ -460,7 +484,6 @@ fn individual_to_svg(individual: &Individual, width: u32, height: u32) -> Docume
                         *x, *y
                     )),
                 Command::Z => data = data.close(),
-                _ => {} // Ignore LinearGradient here as it's handled separately
             }
         }
 
@@ -525,6 +548,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if image_paths.is_empty() {
         return Err("No PNG images found in the specified directory".into());
     }
+
+
+
+    let (update_sender, update_receiver) = mpsc::channel::<Vec<IndividualInfo>>();
+
+
+
 
     let mut rng = thread_rng();
     image_paths.shuffle(&mut rng);
