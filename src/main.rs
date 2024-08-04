@@ -24,7 +24,7 @@ const POPULATION_SIZE: usize = 50;
 const GENERATIONS: usize = 10000;
 const ELITISM_COUNT: usize = 5;
 const PLATEAU_THRESHOLD: usize = 50; // Number of generations to check for plateau
-const PLATEAU_IMPROVEMENT_THRESHOLD: f32 = 0.05; // Minimum improvement to not be considered a plateau
+const PLATEAU_IMPROVEMENT_THRESHOLD: f32 = 0.001; // Minimum improvement to not be considered a plateau
 const MAX_PATHS: usize = 40;
 const MAX_COMMANDS_PER_PATH: usize = 50;
 
@@ -386,55 +386,67 @@ fn tournament_selection<'a>(population: &'a [Individual], tournament_size: usize
         .unwrap()
 }
 
+
+
+
+
+
+
+
+
 fn mutate(individual: &mut Individual, rng: &mut impl Rng, width: u32, height: u32, mutation_rate: f32) {
-    // Mutate existing paths and commands
+    let major_mutation_chance = 0.1; // 10% chance for a major mutation
+
     for (commands, style) in &mut individual.paths {
         // Mutate commands
         for command in commands.iter_mut() {
             if rng.gen::<f32>() < mutation_rate {
-                *command = random_command(rng, width, height);
+                if rng.gen::<f32>() < major_mutation_chance {
+                    *command = random_command(rng, width, height);
+                } else {
+                    mutate_command(command, rng, width, height);
+                }
             }
         }
 
         // Mutate style
         if rng.gen::<f32>() < mutation_rate {
-            style.fill = Some(random_color(rng));
+            if rng.gen::<f32>() < major_mutation_chance {
+                style.fill = Some(random_color(rng));
+            } else if let Some(fill) = &mut style.fill {
+                mutate_color(fill, rng);
+            }
         }
+
         if rng.gen::<f32>() < mutation_rate {
-            style.gradient = if rng.gen_bool(0.5) {
-                let geo = Geometric::new(0.5).unwrap();
-                let num_colors = geo.sample(rng) as usize + 2;
-                Some(LinearGradient {
-                    start: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
-                    end: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
-                    colors: (0..num_colors).map(|_| random_color(rng)).collect(),
-                })
-            } else {
-                None
-            };
+            if rng.gen::<f32>() < major_mutation_chance {
+                style.gradient = if rng.gen_bool(0.5) {
+                    Some(random_gradient(rng, width, height))
+                } else {
+                    None
+                };
+            } else if let Some(gradient) = &mut style.gradient {
+                mutate_gradient(gradient, rng, width, height);
+            }
         }
 
         // Mutate number of commands in this path
         if rng.gen::<f32>() < mutation_rate {
             if rng.gen_bool(0.5) && commands.len() > 1 {
-                // Remove a random command
                 let index = rng.gen_range(0..commands.len());
                 commands.remove(index);
             } else if commands.len() < MAX_COMMANDS_PER_PATH {
-                // Add a new command
                 commands.push(random_command(rng, width, height));
             }
         }
     }
 
-    // Mutate number of paths
+    // Mutate number of paths 
     if rng.gen::<f32>() < mutation_rate {
         if rng.gen_bool(0.5) && individual.paths.len() > 1 {
-            // Remove a random path
             let index = rng.gen_range(0..individual.paths.len());
             individual.paths.remove(index);
         } else if individual.paths.len() < MAX_PATHS {
-            // Add a new path
             individual.paths.push((
                 vec![random_command(rng, width, height)],
                 random_path_style(rng, width, height),
@@ -442,7 +454,7 @@ fn mutate(individual: &mut Individual, rng: &mut impl Rng, width: u32, height: u
         }
     }
 
-    // Ensure at least two paths and two commands per path
+    // Ensure at least two paths and two commands per path 
     while individual.paths.len() < 2 {
         individual.paths.push((
             vec![random_command(rng, width, height), random_command(rng, width, height)],
@@ -456,6 +468,103 @@ fn mutate(individual: &mut Individual, rng: &mut impl Rng, width: u32, height: u
         }
     }
 }
+
+
+
+
+
+
+
+fn mutate_command(command: &mut Command, rng: &mut impl Rng, width: u32, height: u32) {
+    let mutation_factor = 0.05; // 5% mutation
+    match command {
+        Command::M(x, y) | Command::L(x, y) => {
+            *x += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+        },
+        Command::H(x) => {
+            *x += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+        },
+        Command::V(y) => {
+            *y += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+        },
+        Command::C(x1, y1, x2, y2, x, y) => {
+            *x1 += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y1 += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+            *x2 += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y2 += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+            *x += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+        },
+        Command::S(x2, y2, x, y) => {
+            *x2 += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y2 += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+            *x += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+        },
+        Command::Q(x1, y1, x, y) => {
+            *x1 += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y1 += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+            *x += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+        },
+        Command::T(x, y) => {
+            *x += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+        },
+        Command::A(rx, ry, x_axis_rotation, large_arc, sweep, x, y) => {
+            *rx += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *ry += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+            *x_axis_rotation += rng.gen_range(-5.0..5.0);
+            *large_arc = rng.gen_bool(0.5);
+            *sweep = rng.gen_bool(0.5);
+            *x += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+            *y += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+        },
+        Command::Z => {},
+    }
+}
+
+
+
+
+
+
+
+fn mutate_color(color: &mut Rgba<u8>, rng: &mut impl Rng) {
+    let mutation_amount = 10;
+    for channel in color.0.iter_mut() {
+        *channel = (*channel as i16 + rng.gen_range(-mutation_amount..=mutation_amount))
+            .max(0).min(255) as u8;
+    }
+}
+
+fn mutate_gradient(gradient: &mut LinearGradient, rng: &mut impl Rng, width: u32, height: u32) {
+    let mutation_factor = 0.05; // 5% mutation
+    gradient.start.0 += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+    gradient.start.1 += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+    gradient.end.0 += rng.gen_range(-mutation_factor..mutation_factor) * width as f32;
+    gradient.end.1 += rng.gen_range(-mutation_factor..mutation_factor) * height as f32;
+
+    for color in &mut gradient.colors {
+        mutate_color(color, rng);
+    }
+}
+
+fn random_gradient(rng: &mut impl Rng, width: u32, height: u32) -> LinearGradient {
+    let geo = Geometric::new(0.5).unwrap();
+    let num_colors = geo.sample(rng) as usize + 2;
+    LinearGradient {
+        start: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
+        end: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
+        colors: (0..num_colors).map(|_| random_color(rng)).collect(),
+    }
+}
+
+
+
+
+
 
 fn individual_to_svg(individual: &Individual, width: u32, height: u32) -> Document {
     let mut document = Document::new()
