@@ -9,9 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use svg::node::element::{Definitions, Filter, Stop, LinearGradient};
+use svg::node::element::{Definitions, Stop};
 use svg::node::element::path::Data;
 use svg::node::element::Path;
+use rand_distr::{Geometric, Distribution};
+
 
 mod ui;
 use ui::run_ui_main_thread;
@@ -19,8 +21,11 @@ use ui::run_ui_main_thread;
 
 const POPULATION_SIZE: usize = 50;
 const GENERATIONS: usize = 10000;
-const MAX_PATHS: usize = 40;
 const ELITISM_COUNT: usize = 5;
+const PLATEAU_THRESHOLD: usize = 50; // Number of generations to check for plateau
+const PLATEAU_IMPROVEMENT_THRESHOLD: f32 = 0.05; // Minimum improvement to not be considered a plateau
+const MAX_PATHS: usize = 40;
+const MAX_COMMANDS_PER_PATH: usize = 50;
 
 #[derive(Clone, Debug)]
 enum Command {
@@ -34,7 +39,6 @@ enum Command {
     T(f32, f32),
     A(f32, f32, f32, bool, bool, f32, f32),
     Z,
-    LinearGradient(CustomLinearGradient),
 }
 
 #[derive(Clone, Debug)]
@@ -44,22 +48,19 @@ struct Individual {
 }
 
 
-
-
 #[derive(Clone, Debug)]
-struct CustomLinearGradient {
+struct LinearGradient {
     start: (f32, f32),
     end: (f32, f32),
     colors: Vec<Rgba<u8>>,
 }
 
+
 #[derive(Clone, Debug)]
 struct PathStyle {
-    fill: Rgba<u8>,
-    gradient: Option<CustomLinearGradient>,
+    fill: Option<Rgba<u8>>,
+    gradient: Option<LinearGradient>,
 }
-
-
 
 fn adaptive_mutation_rate(generation: usize, max_generations: usize) -> f32 {
     let min_rate = 0.01;
@@ -102,11 +103,9 @@ fn random_color(rng: &mut impl Rng) -> Rgba<u8> {
 }
 
 fn create_random_individual(rng: &mut impl Rng, width: u32, height: u32) -> Individual {
-    let num_paths = rng.gen_range(1..=100);
-    let paths: Vec<(Vec<Command>, PathStyle)> = (0..num_paths)
+    let paths: Vec<(Vec<Command>, PathStyle)> = (0..2)  // Always create 2 paths
         .map(|_| {
-            let num_commands = rng.gen_range(1..=50);
-            let commands: Vec<Command> = (0..num_commands)
+            let commands: Vec<Command> = (0..2)  // Always create 2 commands per path
                 .map(|_| random_command(rng, width, height))
                 .collect();
             (commands, random_path_style(rng, width, height))
@@ -117,17 +116,28 @@ fn create_random_individual(rng: &mut impl Rng, width: u32, height: u32) -> Indi
 }
 
 fn random_path_style(rng: &mut impl Rng, width: u32, height: u32) -> PathStyle {
-    PathStyle {
-        fill: random_color(rng),
-        gradient: if rng.gen_bool(0.5) {
-            Some(CustomLinearGradient {
+    if rng.gen_bool(0.8) { // Chance of having a gradient
+        // Create a geometric distribution with p = 0.5
+        // This means each subsequent number is half as likely as the previous one
+        let geo = Geometric::new(0.5).unwrap();
+        
+        // Generate a random number from this distribution and add 2
+        // (because geometric distribution starts at 0, but we want to start at 2)
+        let num_colors = geo.sample(rng) as usize + 2;
+
+        PathStyle {
+            fill: None,
+            gradient: Some(LinearGradient {
                 start: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
                 end: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
-                colors: (0..5).map(|_| random_color(rng)).collect(), //  5 colors
+                colors: (0..num_colors).map(|_| random_color(rng)).collect(),
             })
-        } else { 
-            None 
-        },
+        }
+    } else {
+        PathStyle {
+            fill: Some(random_color(rng)),
+            gradient: None,
+        }
     }
 }
 
@@ -249,6 +259,9 @@ fn optimize_image(
     let mut rng = rand::thread_rng();
     let (width, height) = img.dimensions();
 
+        let mut best_fitness = 0.0;
+    let mut generations_without_improvement = 0;
+
     let mut population: Vec<Individual> = (0..POPULATION_SIZE)
         .map(|_| {
             let mut individual = create_random_individual(&mut rng, width, height);
@@ -292,6 +305,24 @@ fn optimize_image(
         new_population.extend(elites);
         population = new_population;
 
+        let current_best_fitness = population[0].fitness;
+        if current_best_fitness > best_fitness + PLATEAU_IMPROVEMENT_THRESHOLD {
+            best_fitness = current_best_fitness;
+            generations_without_improvement = 0;
+        } else {
+            generations_without_improvement += 1;
+        }
+
+        if generations_without_improvement >= PLATEAU_THRESHOLD {
+            // Allow complexity increase
+            for individual in &mut population {
+                if rng.gen_bool(0.2) { // 20% chance to add complexity
+                    add_complexity(individual, &mut rng, width, height);
+                }
+            }
+            generations_without_improvement = 0;
+        }
+
         // Periodic population refresh
         if gen % 50 == 0 && gen > 0 {
             let num_refresh = POPULATION_SIZE / 10;
@@ -309,6 +340,21 @@ fn optimize_image(
 }
 
 
+fn add_complexity(individual: &mut Individual, rng: &mut impl Rng, width: u32, height: u32) {
+    if rng.gen_bool(0.5) {
+        // Add a new path
+        individual.paths.push((
+            vec![random_command(rng, width, height)],
+            random_path_style(rng, width, height),
+        ));
+    } else {
+        // Add a new command to a random existing path
+        if let Some((commands, _)) = individual.paths.choose_mut(rng) {
+            commands.push(random_command(rng, width, height));
+        }
+    }
+}
+
 fn tournament_selection<'a>(population: &'a [Individual], tournament_size: usize, rng: &mut impl Rng) -> &'a Individual {
     population
         .choose_multiple(rng, tournament_size)
@@ -316,44 +362,76 @@ fn tournament_selection<'a>(population: &'a [Individual], tournament_size: usize
         .unwrap()
 }
 
-
 fn mutate(individual: &mut Individual, rng: &mut impl Rng, width: u32, height: u32, mutation_rate: f32) {
+    // Mutate existing paths and commands
     for (commands, style) in &mut individual.paths {
-        if rng.gen::<f32>() < mutation_rate {
-            let index = rng.gen_range(0..commands.len());
-            commands[index] = random_command(rng, width, height);
+        // Mutate commands
+        for command in commands.iter_mut() {
+            if rng.gen::<f32>() < mutation_rate {
+                *command = random_command(rng, width, height);
+            }
         }
+
+        // Mutate style
         if rng.gen::<f32>() < mutation_rate {
-            style.fill = random_color(rng);
+            style.fill = Some(random_color(rng));
         }
         if rng.gen::<f32>() < mutation_rate {
             style.gradient = if rng.gen_bool(0.5) {
-                Some(CustomLinearGradient {
+                let geo = Geometric::new(0.5).unwrap();
+                let num_colors = geo.sample(rng) as usize + 2;
+                Some(LinearGradient {
                     start: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
                     end: (rng.gen_range(0.0..width as f32), rng.gen_range(0.0..height as f32)),
-                    colors: (0..5).map(|_| random_color(rng)).collect(), // 5 colors
+                    colors: (0..num_colors).map(|_| random_color(rng)).collect(),
                 })
             } else {
                 None
             };
         }
+
+        // Mutate number of commands in this path
+        if rng.gen::<f32>() < mutation_rate {
+            if rng.gen_bool(0.5) && commands.len() > 1 {
+                // Remove a random command
+                let index = rng.gen_range(0..commands.len());
+                commands.remove(index);
+            } else if commands.len() < MAX_COMMANDS_PER_PATH {
+                // Add a new command
+                commands.push(random_command(rng, width, height));
+            }
+        }
     }
+
+    // Mutate number of paths
     if rng.gen::<f32>() < mutation_rate {
-        if individual.paths.len() < MAX_PATHS {
+        if rng.gen_bool(0.5) && individual.paths.len() > 1 {
+            // Remove a random path
+            let index = rng.gen_range(0..individual.paths.len());
+            individual.paths.remove(index);
+        } else if individual.paths.len() < MAX_PATHS {
+            // Add a new path
             individual.paths.push((
                 vec![random_command(rng, width, height)],
                 random_path_style(rng, width, height),
             ));
-        } else if !individual.paths.is_empty() {
-            let index = rng.gen_range(0..individual.paths.len());
-            individual.paths.remove(index);
+        }
+    }
+
+    // Ensure at least two paths and two commands per path
+    while individual.paths.len() < 2 {
+        individual.paths.push((
+            vec![random_command(rng, width, height), random_command(rng, width, height)],
+            random_path_style(rng, width, height),
+        ));
+    }
+
+    for (commands, _) in &mut individual.paths {
+        while commands.len() < 2 {
+            commands.push(random_command(rng, width, height));
         }
     }
 }
-
-
-
-
 
 fn individual_to_svg(individual: &Individual, width: u32, height: u32) -> Document {
     let mut document = Document::new()
@@ -400,15 +478,16 @@ fn individual_to_svg(individual: &Individual, width: u32, height: u32) -> Docume
             for (j, color) in gradient.colors.iter().enumerate() {
                 let stop = Stop::new()
                     .set("offset", format!("{}%", j * 100 / (gradient.colors.len() - 1)))
-                    .set("stop-color", format!("rgb({},{},{})", color[0], color[1], color[2]))
-                    .set("stop-opacity", format!("{}", color[3] as f32 / 255.0));
+                    .set("stop-color", format!("rgba({},{},{},{})", color[0], color[1], color[2], color[3]));
                 linear_gradient = linear_gradient.add(stop);
             }
 
             defs = defs.add(linear_gradient);
             path = path.set("fill", format!("url(#{})", gradient_id));
+        } else if let Some(fill) = style.fill {
+            path = path.set("fill", format!("rgba({},{},{},{})", fill[0], fill[1], fill[2], fill[3]));
         } else {
-            path = path.set("fill", format!("rgba({},{},{},{})", style.fill[0], style.fill[1], style.fill[2], style.fill[3]));
+            path = path.set("fill", "none");
         }
 
         document = document.add(path);
@@ -418,27 +497,45 @@ fn individual_to_svg(individual: &Individual, width: u32, height: u32) -> Docume
 }
 
 
+
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let images_dir = "/Users/scott/Downloads/converge/images";
     let output_dir = "/Users/scott/Downloads/converge/output";
     fs::create_dir_all(output_dir)?;
 
+    println!("Reading directory: {}", images_dir);
+
     let mut image_paths: Vec<_> = fs::read_dir(images_dir)?
         .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.extension()?.to_str()? == "png" {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let extension = path.extension()?;
+            if extension == "png" {
                 Some(path)
             } else {
+                println!("Skipping non-PNG file: {:?}", path);
                 None
             }
         })
         .collect();
-    image_paths.shuffle(&mut thread_rng());
+
+    println!("Found {} PNG images", image_paths.len());
+
+    if image_paths.is_empty() {
+        return Err("No PNG images found in the specified directory".into());
+    }
+
+    let mut rng = thread_rng();
+    image_paths.shuffle(&mut rng);
 
     for path in image_paths {
-        let img = image::open(&path).expect("Failed to open image");
+        println!("Processing image: {:?}", path);
+        let img = image::open(&path).map_err(|e| format!("Failed to open image {:?}: {}", path, e))?;
         let img_rgba = img.to_rgba8();
         let (width, height) = img.dimensions();
+
+        println!("Image dimensions: {}x{}", width, height);
 
         let best_individual = Arc::new(Mutex::new(Individual { paths: Vec::new(), fitness: 0.0 }));
         let current_image = Arc::new(Mutex::new(RgbaImage::new(width, height)));
@@ -483,7 +580,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let svg_document = individual_to_svg(&final_best_individual, width, height);
         let svg_filename = path.file_stem().unwrap().to_str().unwrap();
         let svg_path = format!("{}/{}.svg", output_dir, svg_filename);
-        svg::save(svg_path, &svg_document).expect("Failed to save SVG");
+        svg::save(&svg_path, &svg_document).map_err(|e| format!("Failed to save SVG {:?}: {}", svg_path, e))?;
 
         println!("Processed: {:?}", path);
     }
