@@ -1,4 +1,4 @@
-use image::{GenericImageView, Rgba};
+use image::{GenericImageView, Rgba, DynamicImage, GrayImage, ImageBuffer, Luma, RgbaImage};
 use rand::Rng;
 use std::fs;
 use std::thread;
@@ -13,11 +13,13 @@ use svg::node::element::{Definitions, Stop};
 use svg::node::element::path::Data;
 use svg::node::element::Path;
 use rand_distr::{Geometric, Distribution};
-use image::RgbaImage;
 use rayon::prelude::*;
-use image::ImageBuffer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::atomic::AtomicU32;
+use imageproc::edges::canny;
+use imageproc::gradients::sobel_gradients;
+use image_compare::{Algorithm, gray_similarity_structure};
+use image::imageops::resize;
 
 
 
@@ -282,12 +284,11 @@ fn render_individual(individual: &Individual, width: u32, height: u32) -> RgbaIm
 
     let tree = Tree::from_str(&document.to_string(), &opt).unwrap();
 
-    let mut pixmap = Pixmap::new(IMAGE_SIZE as u32, IMAGE_SIZE as u32).unwrap();
-
+    let mut pixmap = Pixmap::new(width, height).unwrap();
     resvg::render(&tree, Transform::default(), &mut pixmap.as_mut());
-
     let raw_pixels = pixmap.take();
-    ImageBuffer::from_raw(IMAGE_SIZE as u32, IMAGE_SIZE as u32, raw_pixels).unwrap()
+    ImageBuffer::from_raw(width, height, raw_pixels).unwrap()
+
 }
 
 
@@ -327,33 +328,108 @@ fn draw_line(image: &mut RgbaImage, x0: f32, y0: f32, x1: f32, y1: f32, color: R
 
 
 
-fn calculate_fitness(img: &image::DynamicImage, individual: &Individual) -> f32 {
+
+
+
+
+
+fn calculate_fitness(img: &DynamicImage, individual: &Individual) -> f32 {
     let (width, height) = img.dimensions();
-    let scale_factor = 4; // Reduce resolution by a factor of 4
-    let scaled_width = width / scale_factor;
-    let scaled_height = height / scale_factor;
     let rendered = render_individual(individual, width, height);
-    let rendered = image::imageops::resize(&rendered, scaled_width, scaled_height, image::imageops::FilterType::Nearest);
     
-    let img_scaled = image::imageops::resize(img, scaled_width, scaled_height, image::imageops::FilterType::Nearest);
+    let window_size = 8u32;
+    let c1 = (0.01f32 * 255.0).powi(2);
+    let c2 = (0.03f32 * 255.0).powi(2);
     
-    let mut total_diff = 0.0;
-    for (p1, p2) in img_scaled.pixels().zip(rendered.pixels()) {
-        for i in 0..4 {
-            let diff = (p1[i] as f32 - p2[i] as f32).powi(2);
-            total_diff += diff;
+    let mut ssim_sum = 0.0;
+    let mut windows = 0;
+    
+    for y in (0..height).step_by(window_size as usize) {
+        for x in (0..width).step_by(window_size as usize) {
+            let mut img_mean = [0.0f32; 4];
+            let mut rendered_mean = [0.0f32; 4];
+            let mut covariance = [0.0f32; 4];
+            let mut img_variance = [0.0f32; 4];
+            let mut rendered_variance = [0.0f32; 4];
+            
+            let window_width = window_size.min(width - x);
+            let window_height = window_size.min(height - y);
+            
+            let n = (window_width * window_height) as f32;
+            if n == 0.0 {
+                continue;
+            }
+            
+            for dy in 0..window_height {
+                for dx in 0..window_width {
+                    let img_pixel = img.get_pixel(x + dx, y + dy);
+                    let rendered_pixel = rendered.get_pixel(x + dx, y + dy);
+                    
+                    for c in 0..4 {
+                        let img_val = img_pixel[c] as f32;
+                        let rendered_val = rendered_pixel[c] as f32;
+                        
+                        img_mean[c] += img_val;
+                        rendered_mean[c] += rendered_val;
+                        covariance[c] += img_val * rendered_val;
+                        img_variance[c] += img_val.powi(2);
+                        rendered_variance[c] += rendered_val.powi(2);
+                    }
+                }
+            }
+            
+            let mut ssim = 1.0;
+            for c in 0..4 {
+                img_mean[c] /= n;
+                rendered_mean[c] /= n;
+                covariance[c] = (covariance[c] / n) - (img_mean[c] * rendered_mean[c]);
+                img_variance[c] = (img_variance[c] / n) - img_mean[c].powi(2);
+                rendered_variance[c] = (rendered_variance[c] / n) - rendered_mean[c].powi(2);
+                
+                let numerator = (2.0 * img_mean[c] * rendered_mean[c] + c1) * (2.0 * covariance[c] + c2);
+                let denominator = (img_mean[c].powi(2) + rendered_mean[c].powi(2) + c1) * 
+                                  (img_variance[c] + rendered_variance[c] + c2);
+                
+                if denominator != 0.0 {
+                    ssim *= numerator / denominator;
+                } else {
+                    ssim *= 0.0;
+                }
+            }
+            
+            let ssim_root = ssim.powf(1.0 / 4.0);
+            if !ssim_root.is_nan() && !ssim_root.is_infinite() {
+                ssim_sum += ssim_root;
+                windows += 1;
+            }
         }
     }
-    let pixel_count = (scaled_width * scaled_height * 4) as f32;
-    let avg_diff = (total_diff / pixel_count).sqrt();
-    1.0 / (1.0 + avg_diff)
+    
+    if windows > 0 {
+        ssim_sum / windows as f32
+    } else {
+        0.0
+    }
 }
+
+
+
+
+
+
 
 fn calculate_fitness_parallel(img: &image::DynamicImage, population: &mut [Individual]) {
     population.par_iter_mut().for_each(|individual| {
         individual.fitness = calculate_fitness(img, individual);
     });
 }
+
+
+
+
+
+
+
 
 
 
@@ -400,12 +476,18 @@ fn optimize_image(
 
         pop.par_sort_unstable_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
 
+        // Create mating pool (excluding elites)
+        let mating_pool: Vec<_> = pop[ELITISM_COUNT..].to_vec();
+
+        // Select elites
+        let elites: Vec<_> = pop[..ELITISM_COUNT].to_vec();
+
         let best = pop[0].clone();
         println!("Generation {}: Best fitness = {}", gen, best.fitness);
 
         {
-            let mut best_ind = best_individual.lock().unwrap();
-            *best_ind = best.clone();
+            let mut best_i = best_individual.lock().unwrap();
+            *best_i = best.clone();
         }
 
         let evolved_image = render_individual(&best, width, height);
@@ -438,18 +520,30 @@ fn optimize_image(
 
         update_sender.send(population_info).unwrap();
 
-        let elites: Vec<Individual> = pop.iter().take(ELITISM_COUNT).cloned().collect();
         let new_population: Vec<_> = (0..POPULATION_SIZE - ELITISM_COUNT)
             .into_par_iter()
             .map(|_| {
                 let mut rng = rand::thread_rng();
-                let parent1 = tournament_selection(&pop, 5, &mut rng);
-                let parent2 = tournament_selection(&pop, 5, &mut rng);
+                
+                // Unwrap parents safely
+                let parent1 = tournament_selection(&mating_pool, 5, &mut rng)
+                    .expect("Failed to select parent1");
+                let parent2 = tournament_selection(&mating_pool, 5, &mut rng)
+                    .expect("Failed to select parent2");
+                
+                // Perform crossover
                 let mut child = crossover(parent1, parent2, &mut rng);
+                
+                // Calculate mutation rate
                 let mutation_rate = adaptive_mutation_rate(gen, GENERATIONS);
+                
+                // Apply mutation
                 mutate(&mut child, &mut rng, width, height, mutation_rate);
+                
+                // Calculate fitness
                 child.fitness = calculate_fitness(img, &child);
-                child
+                
+                child // Return the child
             })
             .collect();
 
@@ -511,11 +605,10 @@ fn add_complexity(individual: &mut Individual, rng: &mut impl Rng, width: u32, h
     }
 }
 
-fn tournament_selection<'a>(population: &'a [Individual], tournament_size: usize, rng: &mut impl Rng) -> &'a Individual {
+fn tournament_selection<'a>(population: &'a [Individual], tournament_size: usize, rng: &mut impl Rng) -> Option<&'a Individual> {
     population
         .choose_multiple(rng, tournament_size)
-        .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
-        .unwrap()
+        .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 
