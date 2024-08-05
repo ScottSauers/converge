@@ -14,6 +14,12 @@ use svg::node::element::path::Data;
 use svg::node::element::Path;
 use rand_distr::{Geometric, Distribution};
 use image::RgbaImage;
+use rayon::prelude::*;
+use image::ImageBuffer;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicU32;
+
+
 
 
 mod ui;
@@ -27,6 +33,7 @@ const PLATEAU_THRESHOLD: usize = 50; // Number of generations to check for plate
 const PLATEAU_IMPROVEMENT_THRESHOLD: f32 = 0.001; // Minimum improvement to not be considered a plateau
 const MAX_PATHS: usize = 40;
 const MAX_COMMANDS_PER_PATH: usize = 50;
+const IMAGE_SIZE: u32 = 256;
 
 #[derive(Clone, Debug)]
 enum Command {
@@ -41,6 +48,28 @@ enum Command {
     A(f32, f32, f32, bool, bool, f32, f32),
     Z,
 }
+
+
+struct AtomicF32 {
+    inner: AtomicU32,
+}
+
+impl AtomicF32 {
+    fn new(val: f32) -> Self {
+        AtomicF32 {
+            inner: AtomicU32::new(val.to_bits()),
+        }
+    }
+
+    fn load(&self, order: Ordering) -> f32 {
+        f32::from_bits(self.inner.load(order))
+    }
+
+    fn store(&self, val: f32, order: Ordering) {
+        self.inner.store(val.to_bits(), order)
+    }
+}
+
 
 #[derive(Clone, Debug)]
 struct Individual {
@@ -176,18 +205,85 @@ fn crossover(parent1: &Individual, parent2: &Individual, rng: &mut impl Rng) -> 
 
 
 
+
 fn render_individual(individual: &Individual, width: u32, height: u32) -> RgbaImage {
-    let svg_document = individual_to_svg(individual, width, height);
-    let svg_string = svg_document.to_string();
+    let mut document = Document::new()
+        .set("viewBox", (0, 0, IMAGE_SIZE, IMAGE_SIZE))
+        .set("width", IMAGE_SIZE)
+        .set("height", IMAGE_SIZE);
 
-    let opts = Options::default();
-    let rtree = Tree::from_str(&svg_string, &opts).unwrap();
+    let mut defs = Definitions::new();
 
-    let mut pixmap = Pixmap::new(width, height).unwrap();
-    resvg::render(&rtree, Transform::default(), &mut pixmap.as_mut());
+    for (i, (commands, style)) in individual.paths.iter().enumerate() {
+        let mut data = Data::new();
+        for command in commands {
+            match command {
+                Command::M(x, y) => data = data.move_to((*x, *y)),
+                Command::L(x, y) => data = data.line_to((*x, *y)),
+                Command::H(x) => data = data.horizontal_line_to(*x),
+                Command::V(y) => data = data.vertical_line_to(*y),
+                Command::C(x1, y1, x2, y2, x, y) => data = data.cubic_curve_to((*x1, *y1, *x2, *y2, *x, *y)),
+                Command::S(x2, y2, x, y) => data = data.smooth_cubic_curve_to((*x2, *y2, *x, *y)),
+                Command::Q(x1, y1, x, y) => data = data.quadratic_curve_to((*x1, *y1, *x, *y)),
+                Command::T(x, y) => data = data.smooth_quadratic_curve_to((*x, *y)),
+                Command::A(rx, ry, x_axis_rotation, large_arc, sweep, x, y) => 
+                    data = data.elliptical_arc_to((
+                        *rx, *ry, *x_axis_rotation, 
+                        if *large_arc { 1 } else { 0 }, 
+                        if *sweep { 1 } else { 0 }, 
+                        *x, *y
+                    )),
+                Command::Z => data = data.close(),
+            }
+        }
 
-    RgbaImage::from_raw(width, height, pixmap.data().to_vec()).unwrap()
+        let mut path = Path::new().set("d", data);
+
+        if let Some(ref gradient) = style.gradient {
+            let gradient_id = format!("gradient-{}", i);
+            let mut linear_gradient = svg::node::element::LinearGradient::new()
+                .set("id", gradient_id.clone())
+                .set("x1", format!("{}%", gradient.start.0 / width as f32 * 100.0))
+                .set("y1", format!("{}%", gradient.start.1 / height as f32 * 100.0))
+                .set("x2", format!("{}%", gradient.end.0 / width as f32 * 100.0))
+                .set("y2", format!("{}%", gradient.end.1 / height as f32 * 100.0));
+
+            for (j, color) in gradient.colors.iter().enumerate() {
+                let stop = Stop::new()
+                    .set("offset", format!("{}%", j * 100 / (gradient.colors.len() - 1)))
+                    .set("stop-color", format!("rgba({},{},{},{})", color[0], color[1], color[2], color[3]));
+                linear_gradient = linear_gradient.add(stop);
+            }
+
+            defs = defs.add(linear_gradient);
+            path = path.set("fill", format!("url(#{})", gradient_id));
+        } else if let Some(fill) = style.fill {
+            path = path.set("fill", format!("rgba({},{},{},{})", fill[0], fill[1], fill[2], fill[3]));
+        } else {
+            path = path.set("fill", "none");
+        }
+
+        document = document.add(path);
+    }
+
+    document = document.add(defs);
+
+    let opt = Options::default();
+
+
+
+    let tree = Tree::from_str(&document.to_string(), &opt).unwrap();
+
+    let mut pixmap = Pixmap::new(IMAGE_SIZE as u32, IMAGE_SIZE as u32).unwrap();
+
+    resvg::render(&tree, Transform::default(), &mut pixmap.as_mut());
+
+    let raw_pixels = pixmap.take();
+    ImageBuffer::from_raw(IMAGE_SIZE as u32, IMAGE_SIZE as u32, raw_pixels).unwrap()
 }
+
+
+
 
 fn draw_line(image: &mut RgbaImage, x0: f32, y0: f32, x1: f32, y1: f32, color: Rgba<u8>) {
     // Simple line drawing algorithm (Bresenham's algorithm)
@@ -223,13 +319,6 @@ fn draw_line(image: &mut RgbaImage, x0: f32, y0: f32, x1: f32, y1: f32, color: R
 
 
 
-
-
-
-
-
-
-
 fn calculate_fitness(img: &image::DynamicImage, individual: &Individual) -> f32 {
     let (width, height) = img.dimensions();
     let rendered = render_individual(individual, width, height);
@@ -248,9 +337,13 @@ fn calculate_fitness(img: &image::DynamicImage, individual: &Individual) -> f32 
     let avg_diff = total_diff / pixel_count as f32;
     let fitness = 1.0 / (1.0 + avg_diff);
 
-    //println!("Total diff: {}, Pixel count: {}, Avg diff: {}, Fitness: {}", total_diff, pixel_count, avg_diff, fitness);
-
     fitness
+}
+
+fn calculate_fitness_parallel(img: &image::DynamicImage, population: &mut [Individual]) {
+    population.par_iter_mut().for_each(|individual| {
+        individual.fitness = calculate_fitness(img, individual);
+    });
 }
 
 
@@ -268,100 +361,132 @@ fn optimize_image(
     running: &Arc<Mutex<bool>>,
     update_sender: mpsc::Sender<Vec<IndividualInfo>>,
 ) -> Individual {
-    let mut rng = rand::thread_rng();
     let (width, height) = img.dimensions();
 
-        let mut best_fitness = 0.0;
-    let mut generations_without_improvement = 0;
+    let best_fitness = Arc::new(AtomicF32::new(0.0));
+    let generations_without_improvement = Arc::new(AtomicUsize::new(0));
 
-    let mut population: Vec<Individual> = (0..POPULATION_SIZE)
+    let mut population: Vec<_> = (0..POPULATION_SIZE)
+        .into_par_iter()
         .map(|_| {
-            let mut individual = create_random_individual(&mut rng, width, height);
-            individual.fitness = calculate_fitness(img, &individual);
-            individual
+            let mut rng = rand::thread_rng();
+            create_random_individual(&mut rng, width, height)
         })
         .collect();
 
-    for gen in 0..GENERATIONS {
+    calculate_fitness_parallel(img, &mut population);
+
+    let population = Arc::new(Mutex::new(population));
+
+    (0..GENERATIONS).into_par_iter().for_each(|gen| {
         if !*running.lock().unwrap() {
-            break;
+            return;
         }
 
-        population.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+        let mut pop = population.lock().unwrap();
+        pop.par_sort_unstable_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
 
-        let best = population[0].clone();
+        let best = pop[0].clone();
         println!("Generation {}: Best fitness = {}", gen, best.fitness);
-        
-        *best_individual.lock().unwrap() = best.clone();
-        let evolved_image = render_individual(&best, width, height);
-        *current_image.lock().unwrap() = evolved_image.clone();
-        fitness_history.lock().unwrap().push(best.fitness);
-        *generation.lock().unwrap() = gen;
 
-        // Create IndividualInfo for each member of the population
-        let population_info: Vec<IndividualInfo> = population.iter().enumerate()
+        {
+            let mut best_ind = best_individual.lock().unwrap();
+            *best_ind = best.clone();
+        }
+
+        let evolved_image = render_individual(&best, width, height);
+
+        {
+            let mut current_img = current_image.lock().unwrap();
+            *current_img = evolved_image;
+        }
+
+        {
+            let mut fitness_hist = fitness_history.lock().unwrap();
+            fitness_hist.push(best.fitness);
+        }
+
+        {
+            let mut gen_count = generation.lock().unwrap();
+            *gen_count = gen;
+        }
+
+        let population_info: Vec<IndividualInfo> = pop.par_iter().enumerate()
             .map(|(i, ind)| IndividualInfo {
                 individual: ind.clone(),
-                parent_ids: None, // track this during crossover
+                parent_ids: None,
                 is_elite: i < ELITISM_COUNT,
-                is_new: false, // set this to true for new individuals
-                survived: true, // All individuals in the current population have survived
-                crossover: false, // Set this during the crossover process
+                is_new: false,
+                survived: true,
+                crossover: false,
             })
             .collect();
 
-        // Send the entire population info to the UI thread
         update_sender.send(population_info).unwrap();
 
-        let elites: Vec<Individual> = population.iter().take(ELITISM_COUNT).cloned().collect();
-        let mut new_population = Vec::new();
+        let elites: Vec<Individual> = pop.iter().take(ELITISM_COUNT).cloned().collect();
+        let new_population: Vec<_> = (0..POPULATION_SIZE - ELITISM_COUNT)
+            .into_par_iter()
+            .map(|_| {
+                let mut rng = rand::thread_rng();
+                let parent1 = tournament_selection(&pop, 5, &mut rng);
+                let parent2 = tournament_selection(&pop, 5, &mut rng);
+                let mut child = crossover(parent1, parent2, &mut rng);
+                let mutation_rate = adaptive_mutation_rate(gen, GENERATIONS);
+                mutate(&mut child, &mut rng, width, height, mutation_rate);
+                child.fitness = calculate_fitness(img, &child);
+                child
+            })
+            .collect();
 
-        while new_population.len() < POPULATION_SIZE - ELITISM_COUNT {
-            let parent1 = tournament_selection(&population, 5, &mut rng);
-            let parent2 = tournament_selection(&population, 5, &mut rng);
-            let mut child = crossover(parent1, parent2, &mut rng);
-            let mutation_rate = adaptive_mutation_rate(gen, GENERATIONS);
-            mutate(&mut child, &mut rng, width, height, mutation_rate);
-            child.fitness = calculate_fitness(img, &child);
-            new_population.push(child);
-        }
+        let mut new_pop = new_population;
+        new_pop.extend(elites);
+        *pop = new_pop;
 
-        new_population.extend(elites);
-        population = new_population;
-
-        let current_best_fitness = population[0].fitness;
-        if current_best_fitness > best_fitness + PLATEAU_IMPROVEMENT_THRESHOLD {
-            best_fitness = current_best_fitness;
-            generations_without_improvement = 0;
+        let current_best_fitness = pop[0].fitness;
+        let best = best_fitness.load(Ordering::Relaxed);
+        if current_best_fitness > best + PLATEAU_IMPROVEMENT_THRESHOLD {
+            best_fitness.store(current_best_fitness, Ordering::Relaxed);
+            generations_without_improvement.store(0, Ordering::Relaxed);
         } else {
-            generations_without_improvement += 1;
+            generations_without_improvement.fetch_add(1, Ordering::Relaxed);
         }
 
-        if generations_without_improvement >= PLATEAU_THRESHOLD {
-            // Allow complexity increase
-            for individual in &mut population {
-                if rng.gen_bool(0.2) { // 20% chance to add complexity
+        if generations_without_improvement.load(Ordering::Relaxed) >= PLATEAU_THRESHOLD {
+            pop.par_iter_mut().for_each(|individual| {
+                let mut rng = rand::thread_rng();
+                if rng.gen_bool(0.2) {
                     add_complexity(individual, &mut rng, width, height);
                 }
-            }
-            generations_without_improvement = 0;
+            });
+            generations_without_improvement.store(0, Ordering::Relaxed);
         }
 
-        // Periodic population refresh
         if gen % 50 == 0 && gen > 0 {
             let num_refresh = POPULATION_SIZE / 10;
-            for _ in 0..num_refresh {
-                let mut new_individual = create_random_individual(&mut rng, width, height);
-                new_individual.fitness = calculate_fitness(img, &new_individual);
-                population.push(new_individual);
-            }
-            population.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
-            population.truncate(POPULATION_SIZE);
+            let refreshed: Vec<_> = (0..num_refresh)
+                .into_par_iter()
+                .map(|_| {
+                    let mut rng = rand::thread_rng();
+                    let mut new_individual = create_random_individual(&mut rng, width, height);
+                    new_individual.fitness = calculate_fitness(img, &new_individual);
+                    new_individual
+                })
+                .collect();
+            pop.extend(refreshed);
+            pop.par_sort_unstable_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+            pop.truncate(POPULATION_SIZE);
         }
-    }
-
-    population.into_iter().max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap()).unwrap()
+    });
+    let best_individual = population.lock().unwrap().par_iter().max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap()).unwrap().clone();
+    best_individual
 }
+
+
+
+
+
+
 
 
 fn add_complexity(individual: &mut Individual, rng: &mut impl Rng, width: u32, height: u32) {
@@ -660,7 +785,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
-    let (update_sender, update_receiver) = mpsc::channel::<Vec<IndividualInfo>>();
 
 
 

@@ -55,7 +55,7 @@ impl EvolutionApp {
         self.population_textures.clear();
 
         for individual_info in &self.population {
-            let image = render_individual(&individual_info.individual, 64, 64);
+            let image = render_individual(&individual_info.individual, 256, 256);
             let texture = load_texture(ctx, &image, &format!("individual_{}", individual_info.individual.fitness));
             self.population_textures.push(texture);
         }
@@ -96,12 +96,13 @@ impl eframe::App for EvolutionApp {
 
             ui.add_space(20.0);
             Plot::new("fitness_plot")
-                .view_aspect(3.0)  // Make the graph larger
+                .view_aspect(3.0)
                 .show(ui, |plot_ui| {
                     let fitness_history = self.fitness_history.lock().unwrap();
+                    let start_gen = self.generation.lock().unwrap().saturating_sub(fitness_history.len());
                     let points: PlotPoints = PlotPoints::from_iter(
                         fitness_history.iter().enumerate()
-                            .map(|(i, &y)| [i as f64, y as f64])
+                            .map(|(i, &y)| [(start_gen + i) as f64, y as f64])
                     );
                     plot_ui.line(Line::new(points));
                 });
@@ -124,41 +125,41 @@ impl eframe::App for EvolutionApp {
                             if i % 5 == 0 && i != 0 {
                                 ui.end_row();
                             }
+                            ui.vertical(|ui| {
+                                let sized_texture = egui::load::SizedTexture::new(texture.id(), egui::vec2(64.0, 64.0));
+                                let mut image_button = egui::ImageButton::new(sized_texture);
+                                
+                                // Apply different styles based on individual's status
+                                if info.is_elite {
+                                    image_button = image_button.tint(egui::Color32::DARK_BLUE);
+                                }
+                                if info.is_new {
+                                    image_button = image_button.frame(true);
+                                }
+                                if self.selected_individual == Some(i) {
+                                    image_button = image_button.selected(true);
+                                }
+                                
+                                // Add the button with a fixed size
+                                if ui.add_sized(egui::vec2(64.0, 64.0), image_button).clicked() {
+                                    self.selected_individual = Some(i);
+                                }
 
-                        ui.vertical(|ui| {
-                            let sized_texture = egui::load::SizedTexture::new(texture.id(), egui::vec2(64.0, 64.0));
-                            let mut image_button = egui::ImageButton::new(sized_texture);
-                            
-                            // Apply different styles based on individual's status
-                            if info.is_elite {
-                                image_button = image_button.tint(egui::Color32::YELLOW);
-                            }
-                            if info.is_new {
-                                image_button = image_button.frame(true);
-                            }
-                            if self.selected_individual == Some(i) {
-                                image_button = image_button.selected(true);
-                            }
-                            
-                            if ui.add(image_button).clicked() {
-                                self.selected_individual = Some(i);
-                            }
-
-                            ui.label(format!("Fitness: {:.4}", info.individual.fitness));
-                            
-                            // Add labels for different types of individuals
-                            if info.is_elite {
-                                ui.label(egui::RichText::new("Elite").color(egui::Color32::YELLOW));
-                            }
-                            if let Some((parent1, parent2)) = info.parent_ids {
-                                ui.label(egui::RichText::new(format!("Child of {} & {}", parent1, parent2)).color(egui::Color32::LIGHT_BLUE));
-                            }
-                            if !info.is_new && !info.is_elite {
-                                ui.label(egui::RichText::new("Survivor").color(egui::Color32::GREEN));
-                            }
-                        });
-                    }
-                });
+                                ui.label(format!("Fitness: {:.4}", info.individual.fitness));
+                                
+                                // Add labels for different types of individuals
+                                if info.is_elite {
+                                    ui.label(egui::RichText::new("Elite").color(egui::Color32::YELLOW));
+                                }
+                                if let Some((parent1, parent2)) = info.parent_ids {
+                                    ui.label(egui::RichText::new(format!("Child of {} & {}", parent1, parent2)).color(egui::Color32::LIGHT_BLUE));
+                                }
+                                if !info.is_new && !info.is_elite {
+                                    ui.label(egui::RichText::new("Survivor").color(egui::Color32::GREEN));
+                                }
+                            });
+                        }
+                    });
             });
         });
 
