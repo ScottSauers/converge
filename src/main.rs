@@ -20,7 +20,8 @@ use imageproc::edges::canny;
 use imageproc::gradients::sobel_gradients;
 use image_compare::{Algorithm, gray_similarity_structure};
 use image::imageops::resize;
-
+use lab::Lab;
+use rgb::RGB;
 
 
 
@@ -32,7 +33,7 @@ const POPULATION_SIZE: usize = 50;
 const GENERATIONS: usize = 10000;
 const ELITISM_COUNT: usize = 5;
 const PLATEAU_THRESHOLD: usize = 2; // Number of generations to check for plateau
-const PLATEAU_IMPROVEMENT_THRESHOLD: f32 = 0.01; // Minimum improvement to not be considered a plateau
+const PLATEAU_IMPROVEMENT_THRESHOLD: f32 = 0.001; // Minimum improvement to not be considered a plateau
 const MAX_PATHS: usize = 40;
 const MAX_COMMANDS_PER_PATH: usize = 50;
 const IMAGE_SIZE: u32 = 256;
@@ -333,6 +334,8 @@ fn draw_line(image: &mut RgbaImage, x0: f32, y0: f32, x1: f32, y1: f32, color: R
 
 
 
+
+
 fn calculate_fitness(img: &DynamicImage, individual: &Individual) -> f32 {
     let (width, height) = img.dimensions();
     let rendered = render_individual(individual, width, height);
@@ -346,11 +349,11 @@ fn calculate_fitness(img: &DynamicImage, individual: &Individual) -> f32 {
     
     for y in (0..height).step_by(window_size as usize) {
         for x in (0..width).step_by(window_size as usize) {
-            let mut img_mean = [0.0f32; 4];
-            let mut rendered_mean = [0.0f32; 4];
-            let mut covariance = [0.0f32; 4];
-            let mut img_variance = [0.0f32; 4];
-            let mut rendered_variance = [0.0f32; 4];
+            let mut img_mean = [0.0f32; 3];
+            let mut rendered_mean = [0.0f32; 3];
+            let mut covariance = [0.0f32; 3];
+            let mut img_variance = [0.0f32; 3];
+            let mut rendered_variance = [0.0f32; 3];
             
             let window_width = window_size.min(width - x);
             let window_height = window_size.min(height - y);
@@ -365,21 +368,25 @@ fn calculate_fitness(img: &DynamicImage, individual: &Individual) -> f32 {
                     let img_pixel = img.get_pixel(x + dx, y + dy);
                     let rendered_pixel = rendered.get_pixel(x + dx, y + dy);
                     
-                    for c in 0..4 {
-                        let img_val = img_pixel[c] as f32;
-                        let rendered_val = rendered_pixel[c] as f32;
-                        
-                        img_mean[c] += img_val;
-                        rendered_mean[c] += rendered_val;
-                        covariance[c] += img_val * rendered_val;
-                        img_variance[c] += img_val.powi(2);
-                        rendered_variance[c] += rendered_val.powi(2);
+                    // Convert RGB to Lab
+                    let img_lab = Lab::from_rgb(&[img_pixel[0], img_pixel[1], img_pixel[2]]);
+                    let rendered_lab = Lab::from_rgb(&[rendered_pixel[0], rendered_pixel[1], rendered_pixel[2]]);
+                    
+                    let img_vals = [img_lab.l, img_lab.a, img_lab.b];
+                    let rendered_vals = [rendered_lab.l, rendered_lab.a, rendered_lab.b];
+                    
+                    for c in 0..3 {
+                        img_mean[c] += img_vals[c];
+                        rendered_mean[c] += rendered_vals[c];
+                        covariance[c] += img_vals[c] * rendered_vals[c];
+                        img_variance[c] += img_vals[c].powi(2);
+                        rendered_variance[c] += rendered_vals[c].powi(2);
                     }
                 }
             }
             
             let mut ssim = 1.0;
-            for c in 0..4 {
+            for c in 0..3 {
                 img_mean[c] /= n;
                 rendered_mean[c] /= n;
                 covariance[c] = (covariance[c] / n) - (img_mean[c] * rendered_mean[c]);
@@ -390,16 +397,15 @@ fn calculate_fitness(img: &DynamicImage, individual: &Individual) -> f32 {
                 let denominator = (img_mean[c].powi(2) + rendered_mean[c].powi(2) + c1) * 
                                   (img_variance[c] + rendered_variance[c] + c2);
                 
-                if denominator != 0.0 {
-                    ssim *= numerator / denominator;
-                } else {
-                    ssim *= 0.0;
-                }
+                let channel_ssim = if denominator != 0.0 { numerator / denominator } else { 0.0 };
+                
+                // Adjust weights to emphasize color
+                let weight = if c == 0 { 0.5 } else { 0.75 }; // 0.5 for luminance, 0.75 for color channels
+                ssim *= channel_ssim.powf(weight);
             }
             
-            let ssim_root = ssim.powf(1.0 / 4.0);
-            if !ssim_root.is_nan() && !ssim_root.is_infinite() {
-                ssim_sum += ssim_root;
+            if !ssim.is_nan() && !ssim.is_infinite() {
+                ssim_sum += ssim;
                 windows += 1;
             }
         }
@@ -411,6 +417,7 @@ fn calculate_fitness(img: &DynamicImage, individual: &Individual) -> f32 {
         0.0
     }
 }
+
 
 
 
