@@ -813,12 +813,14 @@ dependencies = [
  "image 0.24.9",
  "image-compare",
  "imageproc",
+ "lab",
  "palette",
  "plotters",
  "rand 0.8.5",
  "rand_distr 0.4.3",
  "rayon",
  "resvg",
+ "rgb",
  "svg",
  "tiny-skia 0.8.4",
  "usvg 0.28.0",
@@ -2059,6 +2061,12 @@ dependencies = [
  "arrayvec",
  "smallvec",
 ]
+
+[[package]]
+name = "lab"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcb6fe1d958d9c2a4298cb5024381522038952ebd0fd3af60d00d3844813c93c"
 
 [[package]]
 name = "lazy_static"
