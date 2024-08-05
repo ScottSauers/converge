@@ -9,8 +9,7 @@ pub struct EvolutionApp {
     target_image: egui::TextureHandle,
     current_best_image: egui::TextureHandle,
     population: Vec<IndividualInfo>,
-    population_textures: Vec<egui::TextureHandle>,
-    best_individual: Arc<Mutex<Individual>>,
+    best_individual: Arc<Mutex<Individual>>, population_textures: Vec<(usize, egui::TextureHandle)>,
     current_image_data: Arc<Mutex<RgbaImage>>,
     fitness_history: Arc<Mutex<Vec<f32>>>,
     generation: Arc<Mutex<usize>>,
@@ -18,7 +17,7 @@ pub struct EvolutionApp {
     update_receiver: Receiver<Vec<IndividualInfo>>,
     selected_individual: Arc<Mutex<Option<usize>>>,
     overall_best_individual: Arc<Mutex<Individual>>,
-}
+} 
 
 impl EvolutionApp {
     pub fn new(
@@ -47,100 +46,83 @@ impl EvolutionApp {
             running,
             update_receiver,
             selected_individual: Arc::new(Mutex::new(None)),
-            overall_best_individual: Arc::new(Mutex::new(Individual { paths: Vec::new(), fitness: 0.0 })),
+            overall_best_individual: Arc::new(Mutex::new(Individual { id: 0, paths: Vec::new(), fitness: 0.0 })),
         }
     }
 
     fn update_population(&mut self, ctx: &egui::Context, new_population: Vec<IndividualInfo>) {
         // Sort population by fitness in descending order
-        let mut sorted_population = new_population.clone();
+        let mut sorted_population = new_population;
         sorted_population.sort_by(|a, b| b.individual.fitness.partial_cmp(&a.individual.fitness).unwrap());
 
-        // Extract elites (assuming you want the top 5 as elite)
+        // Extract elites (top 5)
         let elite = sorted_population.iter().take(5).cloned().collect::<Vec<IndividualInfo>>();
 
         // Select top 10 individuals AFTER the elite
         let top_10 = sorted_population.iter().skip(5).take(10).cloned().collect::<Vec<IndividualInfo>>();
+
+        // Select bottom 10 individuals
         let bottom_10 = sorted_population.iter().rev().take(10).cloned().collect::<Vec<IndividualInfo>>();
 
-        // Update the population and textures (correct order: elite, top_10, bottom_10)
-        self.population = elite.iter().chain(top_10.iter()).chain(bottom_10.iter()).cloned().collect();
-        self.population_textures.clear();
+        // Update the population
+        self.population = elite.into_iter()
+            .chain(top_10.into_iter())
+            .chain(bottom_10.into_iter())
+            .collect();
 
+        // Clear and update textures
+        self.population_textures.clear();
         for individual_info in &self.population {
             let image = render_individual(&individual_info.individual, 256, 256);
-            let texture = load_texture(ctx, &image, &format!("individual_{}", individual_info.individual.fitness));
-            self.population_textures.push(texture);
+            let texture = load_texture(ctx, &image, &format!("individual_{}", individual_info.individual.id));
+            self.population_textures.push((individual_info.individual.id, texture));
         }
 
-        // Update current_best_image based on the actual best individual
-        if let Some(best) = sorted_population.first() { // Use sorted_population here
+        // Update current_best_image
+        if let Some(best) = sorted_population.first() {
             let best_image = render_individual(&best.individual, 256, 256);
             self.current_best_image = load_texture(ctx, &best_image, "current_best_image");
             *self.current_image_data.lock().unwrap() = best_image;
         }
-
-        // Update overall_best_individual (for the "big" display)
-        let mut overall_best = self.overall_best_individual.lock().unwrap();
-        if let Some(best) = sorted_population.first() {
-            if best.individual.fitness > overall_best.fitness {
-                *overall_best = best.individual.clone();
-            }
-        }
     }
 
-    fn display_individuals(&self, ctx: &egui::Context, ui: &mut egui::Ui, individuals: Vec<&IndividualInfo>) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("population_grid")
-                .max_col_width(100.0)
-                .min_col_width(80.0)
-                .show(ui, |ui| {
-                    for (i, info) in individuals.iter().enumerate() {
-                        // Use ui.push_id() to create a unique ID scope for each individual
-                        ui.push_id(i, |ui| { 
-                            if i % 8 == 0 && i != 0 {
-                                ui.end_row();
-                            }
-                            ui.vertical(|ui| {
-                                let texture = &self.population_textures[i];
-                                let sized_texture = egui::load::SizedTexture::new(texture.id(), egui::vec2(64.0, 64.0));
-                                let mut image_button = egui::ImageButton::new(sized_texture);
-                                
-                                // Apply different styles based on individual's status
-                                if info.is_elite {
-                                    image_button = image_button.rounding(egui::Rounding::same(10.0))
+    fn display_individuals(&self, ui: &mut egui::Ui, individuals: &[IndividualInfo], id_prefix: &str) {
+        ui.horizontal_wrapped(|ui| {
+            for (local_index, info) in individuals.iter().enumerate() {
+                let unique_id = format!("{}_{}_{}", id_prefix, local_index, info.individual.fitness);
+                ui.push_id(unique_id, |ui| {
+                    ui.vertical(|ui| {
+                        // Find the correct texture for this individual
+                        if let Some((_, texture)) = self.population_textures.iter()
+                            .find(|(id, _)| *id == info.individual.id) {
+                                let image = egui::Image::new(egui::load::SizedTexture::new(texture.id(), egui::vec2(64.0, 64.0)));
+                                if ui.add(image).clicked() {
+                                    *self.selected_individual.lock().unwrap() = Some(info.individual.id);
                                 }
-                                if info.is_new {
-                                    image_button = image_button.frame(true);
-                                }
-                                if *self.selected_individual.lock().unwrap() == Some(i) {
-                                    image_button = image_button.selected(true);
-                                }
-                                
-                                // Add the button with a fixed size
-                                if ui.add_sized(egui::vec2(64.0, 64.0), image_button).clicked() {
-                                    *self.selected_individual.lock().unwrap() = Some(i);
-                                }
+                        } else {
+                            ui.label("Image not found");
+                        }
 
-                                ui.label(format!("Fitness: {:.4}", info.individual.fitness));
-                                
-                                // Add labels for different types of individuals
-                                if info.is_elite {
-                                    ui.label(egui::RichText::new("Elite").color(egui::Color32::DARK_BLUE));
-                                }
-                                if let Some((parent1, parent2)) = info.parent_ids {
-                                    ui.label(egui::RichText::new(format!("Child of {} & {}", parent1, parent2)).color(egui::Color32::LIGHT_BLUE));
-                                }
-                                if !info.is_new && !info.is_elite {
-                                    ui.label(egui::RichText::new("Survivor").color(egui::Color32::GREEN));
-                                }
-                            });
-                        }); // End ui.push_id()
-                    }
+                        ui.label(format!("Fitness: {:.4}", info.individual.fitness));
+                        
+                        if info.is_elite {
+                            ui.label(egui::RichText::new("Elite").color(egui::Color32::GOLD));
+                        }
+                        if info.is_new {
+                            ui.label(egui::RichText::new("New").color(egui::Color32::GREEN));
+                        }
+                    });
                 });
+                ui.add_space(4.0);
+            }
         });
     }
 }
+
+
+
+
+
 
 impl eframe::App for EvolutionApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -149,97 +131,91 @@ impl eframe::App for EvolutionApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Top section
-            ui.horizontal(|ui| {
-                ui.image(&self.target_image);
-                ui.image(&self.current_best_image);
-            });
-
-            ui.add_space(10.0);
-
-            // Middle section
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.heading("Controls");
-                    if ui.button("Start").clicked() {
-                        *self.running.lock().unwrap() = true;
-                    }
-                    if ui.button("Stop").clicked() {
-                        *self.running.lock().unwrap() = false;
-                    }
+                    ui.heading("Target Image");
+                    ui.image(&self.target_image);
                 });
-
                 ui.vertical(|ui| {
+                    ui.heading("Current Best");
+                    ui.image(&self.current_best_image);
+                });
+                ui.vertical(|ui| {
+                    ui.heading("Statistics");
                     ui.label(format!("Generation: {}", *self.generation.lock().unwrap()));
                     ui.label(format!("Best Fitness: {:.4}", self.best_individual.lock().unwrap().fitness));
-                });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    
                     Plot::new("fitness_plot")
-                        .view_aspect(3.0)
-                        .width(200.0)
-                        .height(100.0)
+                        .view_aspect(2.0)
                         .show(ui, |plot_ui| {
                             let fitness_history = self.fitness_history.lock().unwrap();
-                            let start_gen = self.generation.lock().unwrap().saturating_sub(fitness_history.len());
-                            let points: PlotPoints = PlotPoints::from_iter(
-                                fitness_history.iter().enumerate()
-                                    .map(|(i, &y)| [(start_gen + i) as f64, y as f64])
-                            );
+                            let points: PlotPoints = fitness_history.iter().enumerate()
+                                .map(|(i, &y)| [i as f64, y as f64])
+                                .collect();
                             plot_ui.line(Line::new(points));
                         });
                 });
             });
 
-            ui.add_space(10.0);
+            ui.add_space(20.0);
 
-            // Bottom section
-            ui.label("Elite Individuals:");
-            ui.push_id("elite_individuals", |ui| {
-                self.display_individuals(ctx, ui, self.population.iter().filter(|info| info.is_elite).collect());
-            });
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Elite Individuals");
+                let elite_count = 5.min(self.population.len());
+                self.display_individuals(ui, &self.population[0..elite_count], "elite");
 
-            ui.add_space(10.0);
-            
-            ui.label("Top 10 Individuals:");
-            ui.push_id("top_10_individuals", |ui| {
-                let top_10_non_elite: Vec<&IndividualInfo> = self.population.iter()
-                    .filter(|info| !info.is_elite)
-                    .take(10)
-                    .collect();
-                self.display_individuals(ctx, ui, top_10_non_elite);
-            });
+                ui.add_space(10.0);
 
-            ui.add_space(10.0);
-            
-            ui.label("Bottom 10 Individuals:");
-            ui.push_id("bottom_10_individuals", |ui| {
-                self.display_individuals(ctx, ui, self.population.iter().rev().take(10).collect());
+                ui.heading("Top 10 Individuals");
+                let top_10_start = elite_count;
+                let top_10_end = (top_10_start + 10).min(self.population.len());
+                self.display_individuals(ui, &self.population[top_10_start..top_10_end], "top_10");
+
+                ui.add_space(10.0);
+
+                ui.heading("Bottom 10 Individuals");
+                let bottom_10_start = self.population.len().saturating_sub(10);
+                self.display_individuals(ui, &self.population[bottom_10_start..], "bottom_10");
             });
         });
 
         if let Some(selected) = *self.selected_individual.lock().unwrap() {
             egui::Window::new("Individual Details")
                 .show(ctx, |ui| {
-                    let info = &self.population[selected];
-                    ui.label(format!("Fitness: {:.4}", info.individual.fitness));
-                    if info.is_elite {
-                        ui.label(egui::RichText::new("Elite Individual").color(egui::Color32::DARK_BLUE));
+                    if let Some(info) = self.population.get(selected) {
+                        ui.label(format!("Fitness: {:.4}", info.individual.fitness));
+                        if info.is_elite {
+                            ui.label(egui::RichText::new("Elite Individual").color(egui::Color32::GOLD));
+                        }
+                        if info.is_new {
+                            ui.label(egui::RichText::new("New Individual").color(egui::Color32::GREEN));
+                        }
+                        if let Some((parent1, parent2)) = info.parent_ids {
+                            ui.label(egui::RichText::new(format!("Parents: {} & {}", parent1, parent2)).color(egui::Color32::LIGHT_BLUE));
+                        }
+                        if info.crossover {
+                            ui.label(egui::RichText::new("Result of Crossover").color(egui::Color32::YELLOW));
+                        }
+                        if info.survived {
+                            ui.label(egui::RichText::new("Survived from Previous Generation").color(egui::Color32::KHAKI));
+                        }
+                        
+                        if let Some((_, texture)) = self.population_textures.iter().find(|(idx, _)| *idx == selected) {
+                            ui.image(texture);
+                        }
                     }
-                    if info.is_new {
-                        ui.label(egui::RichText::new("New Individual").color(egui::Color32::LIGHT_BLUE));
-                    }
-                    if let Some((parent1, parent2)) = info.parent_ids {
-                        ui.label(egui::RichText::new(format!("Parents: {} & {}", parent1, parent2)).color(egui::Color32::LIGHT_BLUE));
-                    }
-                    if !info.is_new && !info.is_elite {
-                        ui.label(egui::RichText::new("Survivor from previous generation").color(egui::Color32::GREEN));
-                    }
-                    // Add more details about the individual here
                 });
         }
+
+        ctx.request_repaint();
     }
 }
+
+
+
+
+
+
 
 fn load_texture(ctx: &egui::Context, image: &RgbaImage, name: &str) -> egui::TextureHandle {
     let size = [image.width() as _, image.height() as _];
